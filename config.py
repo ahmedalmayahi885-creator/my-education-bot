@@ -1,23 +1,25 @@
 import os
 from dotenv import load_dotenv
 
-# تحميل المتغيرات من ملف .env إن وجد
 load_dotenv()
 
-# توكن البوت
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8933862542:AAH9bGh_rVCZXM_1Ln-6FpKkevDoIGgrIFM")
+def _required(name: str) -> str:
+    value = os.getenv(name, '').strip()
+    if not value:
+        raise RuntimeError(f'Missing required environment variable: {name}')
+    return value
 
-# معرف الأدمن الأساسي (السوبر أدمن)
-ADMIN_ID = int(os.getenv("ADMIN_ID", "190332205"))
+BOT_TOKEN = _required('BOT_TOKEN')
+ADMIN_ID = int(_required('ADMIN_ID'))
+DATABASE_URL = _required('DATABASE_URL')
+CHANNEL_USERNAME = os.getenv('CHANNEL_USERNAME', '').strip()
 
-# رابط أو اسم قاعدة البيانات (educational_bot)
-DATABASE_URL = os.getenv(
-    "DATABASE_URL", 
-    "postgresql+asyncpg://postgres:123456@localhost:5432/educational_bot"
-)
+# Railway/Postgres providers often expose postgres:// or postgresql:// URLs.
+# SQLAlchemy async engine needs the asyncpg driver explicitly.
+if DATABASE_URL.startswith('postgres://'):
+    DATABASE_URL = 'postgresql+asyncpg://' + DATABASE_URL[len('postgres://'):]
+elif DATABASE_URL.startswith('postgresql://'):
+    DATABASE_URL = 'postgresql+asyncpg://' + DATABASE_URL[len('postgresql://'):]
 
-# معرف القناة الخاصة بالبوت
-CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "@alnukba2027")
-
-if not BOT_TOKEN:
-    raise ValueError("لم يتم العثور على BOT_TOKEN في الإعدادات")
+if CHANNEL_USERNAME and not CHANNEL_USERNAME.startswith('@'):
+    CHANNEL_USERNAME = '@' + CHANNEL_USERNAME

@@ -44,9 +44,9 @@ class Subject(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     grade_id: Mapped[int] = mapped_column(ForeignKey("grades.id"))
+    
     grade = relationship("Grade", back_populates="subjects")
     lessons = relationship("Lesson", back_populates="subject", cascade="all, delete-orphan")
-    contents = relationship("Content", back_populates="subject", cascade="all, delete-orphan")
     assignments = relationship("Assignment", back_populates="subject", cascade="all, delete-orphan")
 
 class Lesson(Base):
@@ -54,20 +54,9 @@ class Lesson(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     title: Mapped[str] = mapped_column(String, nullable=False)
     subject_id: Mapped[int] = mapped_column(ForeignKey("subjects.id"))
+    
     subject = relationship("Subject", back_populates="lessons")
-    contents = relationship("Content", back_populates="lesson", cascade="all, delete-orphan")
     files = relationship("FileItem", back_populates="lesson", cascade="all, delete-orphan")
-
-class Content(Base):
-    __tablename__ = "contents"
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    title: Mapped[str] = mapped_column(String, nullable=False)
-    file_id: Mapped[str] = mapped_column(String, nullable=True)
-    file_type: Mapped[str] = mapped_column(String, nullable=True)
-    subject_id: Mapped[int] = mapped_column(ForeignKey("subjects.id"))
-    lesson_id: Mapped[int] = mapped_column(ForeignKey("lessons.id"), nullable=True)
-    subject = relationship("Subject", back_populates="contents")
-    lesson = relationship("Lesson", back_populates="contents")
 
 class FileItem(Base):
     __tablename__ = "file_items"
@@ -77,6 +66,7 @@ class FileItem(Base):
     file_type: Mapped[str] = mapped_column(String, default="document")
     views_count: Mapped[int] = mapped_column(Integer, default=0)
     lesson_id: Mapped[int] = mapped_column(ForeignKey("lessons.id"))
+    
     lesson = relationship("Lesson", back_populates="files")
 
 class TeacherSubject(Base):
@@ -102,8 +92,6 @@ class SubscriptionCode(Base):
     is_used: Mapped[bool] = mapped_column(Boolean, default=False)
     used_by: Mapped[int] = mapped_column(BigInteger, nullable=True)
     created_at = mapped_column(DateTime, server_default=func.now())
-
-# --- جداول الميزات المضافة ---
 
 class Assignment(Base):
     __tablename__ = "assignments"
@@ -136,16 +124,8 @@ class Attendance(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     student_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"))
     subject_id: Mapped[int] = mapped_column(ForeignKey("subjects.id"))
-    status: Mapped[str] = mapped_column(String, default="حاضر")  # حاضر / غائب / بعذر
+    status: Mapped[str] = mapped_column(String, default="حاضر")
     session_date = mapped_column(DateTime, server_default=func.now())
-
-class Schedule(Base):
-    __tablename__ = "schedules"
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    subject_id: Mapped[int] = mapped_column(ForeignKey("subjects.id"))
-    title: Mapped[str] = mapped_column(String, nullable=False)  # اسم المحاضرة أو الامتحان
-    event_type: Mapped[str] = mapped_column(String, default="محاضرة") # محاضرة / امتحان
-    event_time = mapped_column(DateTime, nullable=False)
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
@@ -170,7 +150,53 @@ async def log_audit_action(user_id: int, action: str, details: str = None):
         except Exception:
             await session.rollback()
 
-# --- إدارة المدرسين والملفات الشخصية ---
+async def create_grade(name: str) -> Grade:
+    async with AsyncSessionLocal() as session:
+        try:
+            grade = Grade(name=name)
+            session.add(grade)
+            await session.commit()
+            await session.refresh(grade)
+            return grade
+        except Exception:
+            await session.rollback()
+            return None
+
+async def create_subject(name: str, grade_id: int) -> Subject:
+    async with AsyncSessionLocal() as session:
+        try:
+            subject = Subject(name=name, grade_id=grade_id)
+            session.add(subject)
+            await session.commit()
+            await session.refresh(subject)
+            return subject
+        except Exception:
+            await session.rollback()
+            return None
+
+async def create_lesson(title: str, subject_id: int) -> Lesson:
+    async with AsyncSessionLocal() as session:
+        try:
+            lesson = Lesson(title=title, subject_id=subject_id)
+            session.add(lesson)
+            await session.commit()
+            await session.refresh(lesson)
+            return lesson
+        except Exception:
+            await session.rollback()
+            return None
+
+async def create_file_item(title: str, lesson_id: int, file_id: str = None, file_type: str = "document") -> FileItem:
+    async with AsyncSessionLocal() as session:
+        try:
+            file_item = FileItem(title=title, lesson_id=lesson_id, file_id=file_id, file_type=file_type)
+            session.add(file_item)
+            await session.commit()
+            await session.refresh(file_item)
+            return file_item
+        except Exception:
+            await session.rollback()
+            return None
 
 async def assign_subject_to_teacher(teacher_id: int, subject_id: int) -> bool:
     async with AsyncSessionLocal() as session:
@@ -292,8 +318,6 @@ async def remove_teacher_permission(ts_id: int) -> bool:
             await session.rollback()
             return False
 
-# --- إدارة الطلاب والمحادثات والحظر ---
-
 async def get_classified_students() -> tuple[list[User], list[User]]:
     async with AsyncSessionLocal() as session:
         sub_users_stmt = select(User).where(User.id.in_(select(Subscription.user_id)))
@@ -363,8 +387,6 @@ async def search_user_by_query(query: str) -> list[User]:
         res = await session.execute(stmt)
         return list(res.scalars().all())
 
-# --- الإذاعة الموجهة ---
-
 async def get_broadcast_target_ids(target_type: str, subject_id: int = None) -> list[int]:
     async with AsyncSessionLocal() as session:
         if target_type == "all":
@@ -388,8 +410,6 @@ async def get_broadcast_target_ids(target_type: str, subject_id: int = None) -> 
             )
             return list(res.scalars().all())
         return []
-
-# --- توليد الرموز والتفعيل ---
 
 def generate_random_code(length: int = 6) -> str:
     chars = string.ascii_uppercase + string.digits
@@ -511,8 +531,6 @@ async def get_unused_codes() -> list[dict]:
             codes.append({"code": c.code, "subject_name": s.name, "sub_type": st})
         return codes
 
-# --- المشاهدات والتعديل والحذف ---
-
 async def increment_file_views(file_id: int):
     async with AsyncSessionLocal() as session:
         try:
@@ -578,8 +596,6 @@ async def delete_file_item(file_id: int) -> bool:
         except Exception: 
             await session.rollback()
             return False
-
-# --- إدارة الميزات المضافة (الواجبات، الدرجات، الحضور والجدول) ---
 
 async def create_assignment(title: str, description: str, subject_id: int, due_date: datetime = None, max_score: float = 100.0) -> int:
     async with AsyncSessionLocal() as session:
@@ -665,8 +681,6 @@ async def get_student_attendance(student_id: int) -> list[dict]:
             })
         return records
 
-# --- الإحصائيات الشاملة ---
-
 async def get_dashboard_stats() -> dict:
     async with AsyncSessionLocal() as session:
         now = datetime.now()
@@ -713,8 +727,6 @@ async def get_all_user_ids() -> list[int]:
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(User.id).where(User.is_blocked == False))
         return list(result.scalars().all())
-
-# --- دالة التصدير لتصدير ملف Excel ---
 
 async def export_all_data_for_excel() -> dict:
     async with AsyncSessionLocal() as session:

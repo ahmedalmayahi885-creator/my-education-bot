@@ -9,19 +9,20 @@ from aiogram.filters import CommandStart, Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 
 from config import BOT_TOKEN, ADMIN_ID, CHANNEL_USERNAME
 from database import (
     init_db, AsyncSessionLocal, User, Grade, Subject, Lesson, FileItem, TeacherSubject, Assignment, Submission, Attendance,
+    create_grade, create_subject, create_lesson, create_file_item,
     delete_grade, delete_subject, delete_lesson, delete_file_item,
     update_subject_name, update_lesson_name, increment_file_views,
     get_dashboard_stats, get_top_viewed_files, get_all_user_ids,
     get_teacher_allowed_subjects, assign_subject_to_teacher,
     get_all_teachers_with_subjects, remove_teacher_permission,
     is_student_subscribed, get_user_subscriptions,
-    create_subscription_code, redeem_subscription_code, check_or_use_free_lecture, get_unused_codes,
+    create_subscription_code, redeem_subscription_code, get_unused_codes,
     update_teacher_profile, get_all_teachers_list, get_teacher_details,
     get_classified_students, get_student_profile, toggle_block_user, search_user_by_query,
     get_broadcast_target_ids, export_all_data_for_excel,
@@ -96,6 +97,42 @@ def get_main_keyboard(user_id: int, is_admin: bool = False, is_teacher: bool = F
         buttons.append([KeyboardButton(text="⚙️ لوحة تحكم إدارة المحتوى")])
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
+CONTACT_TEXT = (
+    "📞 تواصل مع منصة النخبة التعليمية (E E P)\n\n"
+    "للاستفسار عن الاشتراكات والمحاضرات أو طلب المساعدة، يسعدنا تواصلك معنا.\n\n"
+    "📱 هاتف وواتساب:\n"
+    "07718515137\n"
+    "07823949292\n\n"
+    "💬 تليجرام للتواصل: @am_iq00"
+)
+
+def get_contact_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 واتساب — الرقم الأول", url="https://wa.me/9647718515137")],
+        [InlineKeyboardButton(text="💬 واتساب — الرقم الثاني", url="https://wa.me/9647823949292")],
+    ])
+
+@dp.message(F.text == "📞 الدعم والاتصال")
+async def support_handler(message: types.Message):
+    await message.answer(CONTACT_TEXT, reply_markup=get_contact_keyboard(), parse_mode=None)
+
+@dp.message(F.text == "ℹ️ عن المنصة")
+async def about_platform_handler(message: types.Message):
+    await message.answer(
+        "🎓 منصة النخبة التعليمية (E E P)\n"
+        "خطوتك اليوم… تصنع تفوّقك غدًا ✨\n\n"
+        "هنا تبدأ رحلتك نحو فهم أعمق وتعلّم أكثر تنظيمًا. "
+        "اجمع محاضراتك وموادك في مكان واحد، تابع دروسك، "
+        "وسلّم واجباتك وتابع درجاتك عبر تليجرام بكل سهولة.\n\n"
+        "📚 مواد ومحاضرات منظّمة حسب مرحلتك الدراسية.\n"
+        "🎁 المحاضرة الأولى من كل مادة مجانية لتبدأ بثقة.\n"
+        "📝 واجبات ومتابعة تساعدك على مواصلة التقدّم.\n\n"
+        "🚀 طموحك يستحق بداية قوية… والنخبة معك في رحلتك.\n\n"
+        + CONTACT_TEXT,
+        reply_markup=get_contact_keyboard(),
+        parse_mode=None,
+    )
+
 @dp.message(F.text == "❌ إلغاء العملية")
 async def cancel_handler(message: types.Message, state: FSMContext):
     u_id = message.from_user.id
@@ -111,14 +148,22 @@ async def cancel_handler(message: types.Message, state: FSMContext):
 # --- فحص الاشتراكات والمستخدمين المحظورين ---
 
 async def is_user_subscribed(user_id: int) -> bool:
-    if str(user_id) == str(ADMIN_ID):
+    if str(user_id) == str(ADMIN_ID) or not CHANNEL_USERNAME:
         return True
     try:
         member = await bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
-        return member.status in ["creator", "administrator", "member"]
+        return member.status in {"creator", "administrator", "member"}
     except Exception as e:
-        logging.error(f"Error checking channel subscription: {e}")
+        logging.error("Error checking channel subscription: %s", e)
         return False
+
+async def is_first_lesson_in_subject(lesson_id: int, subject_id: int) -> bool:
+    """The first created lesson in every subject is free for students."""
+    async with AsyncSessionLocal() as session:
+        first_id = await session.scalar(
+            select(func.min(Lesson.id)).where(Lesson.subject_id == subject_id)
+        )
+    return first_id == lesson_id
 
 def get_join_channel_keyboard():
     channel_url = f"https://t.me/{CHANNEL_USERNAME.replace('@', '')}"
@@ -149,7 +194,7 @@ async def check_subscription_and_block_middleware(handler, event: types.Message,
 
     if not await is_user_subscribed(user_id):
         text = (
-            f"⚠️️ **عذراً عزيزي الطالب!**\n\n"
+            f"⚠ **عذراً عزيزي الطالب!**\n\n"
             f"لاستخدام البوت والاستفادة من الملخصات والمحاضرات، يرجى الاشتراك أولاً في قناة المنصة الرسمية:\n"
             f"👉 {CHANNEL_USERNAME}"
         )
@@ -190,7 +235,7 @@ async def start_handler(message: types.Message):
 async def send_file_item_to_user(message_or_callback, f: FileItem):
     await increment_file_views(f.id)
     views = (f.views_count or 0) + 1
-    caption = f"📌 **{f.title}**\n\n👁️️ عدد المشاهدات: `{views}`"
+    caption = f"📌 **{f.title}**\n\n👁 عدد المشاهدات: `{views}`"
 
     target = message_or_callback.message if isinstance(message_or_callback, types.CallbackQuery) else message_or_callback
 
@@ -464,16 +509,15 @@ async def show_files(callback: types.CallbackQuery, state: FSMContext):
     is_subbed = await is_student_subscribed(user_id, subject_id)
     
     if not is_subbed and str(user_id) != str(ADMIN_ID) and not is_owner_teacher:
-        used_free_now = await check_or_use_free_lecture(user_id)
-        if used_free_now:
-            await callback.message.answer("🎁 **لقد استخدمت حقك في مشاهدة هذه المحاضرة مجاناً بتجربة مفتوحة!**\nشاهد المرفقات أدناه:")
+        if await is_first_lesson_in_subject(lesson_id, subject_id):
+            await callback.message.answer("🎁 **هذه هي المحاضرة الأولى في المادة وهي مجانية.**\nشاهد المرفقات أدناه:", parse_mode="Markdown")
         else:
             await state.update_data(target_subject_id=subject_id)
             builder = [[InlineKeyboardButton(text="🔑 أدخل كود الاشتراك", callback_data=f"enter_code_sub_{subject_id}")]]
             await callback.message.answer(
-                "🔒 **هذه المحاضرة محمية ومتاحة للمشتركين فقط!**\n\n"
-                "لقد استنفدت المحاضرة المجانية التجريبية سابقاً.\n"
-                "يرجى الاشتراك بالرمز لمتابعة باقي دروس هذه المادة.",
+                "🔒 **هذه المحاضرة متاحة للمشتركين فقط.**\n\n"
+                "المحاضرة الأولى في كل مادة مجانية، وبقية المحاضرات تتطلب اشتراكاً.\n"
+                "أدخل كود الاشتراك لمتابعة دروس هذه المادة.",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=builder),
                 parse_mode="Markdown"
             )
@@ -564,9 +608,8 @@ async def get_single_file(callback: types.CallbackQuery, state: FSMContext):
         subject_id = f.lesson.subject_id if f.lesson else None
 
     if subject_id and not await is_student_subscribed(user_id, subject_id) and str(user_id) != str(ADMIN_ID):
-        used_free_now = await check_or_use_free_lecture(user_id)
-        if not used_free_now:
-            await callback.message.answer("🔒 هذا المحتوى تابع لمادة تتطلب اشتراكاً عبر كود.")
+        if not await is_first_lesson_in_subject(f.lesson_id, subject_id):
+            await callback.message.answer("🔒 هذا المحتوى تابع لمحاضرة تتطلب اشتراكاً عبر كود. المحاضرة الأولى فقط من كل مادة مجانية.")
             await callback.answer()
             return
 
@@ -602,7 +645,7 @@ async def tch_create_assignment_start(callback: types.CallbackQuery, state: FSMC
             subjects = (await session.execute(select(Subject).where(Subject.id.in_(allowed_ids)))).scalars().all()
 
     if not subjects:
-        await callback.message.answer("⚠️ لا توجد مواد مسندة إليك.")
+        await callback.message.answer("⚠️️ لا توجد مواد مسندة إليك.")
         await callback.answer()
         return
 
@@ -756,7 +799,7 @@ async def teacher_my_content_view(callback: types.CallbackQuery):
     allowed_ids = await get_teacher_allowed_subjects(u_id)
 
     if not allowed_ids and str(u_id) != str(ADMIN_ID):
-        await callback.message.answer("⚠️ ليس لديك أي مواد مخصصة حالياً.")
+        await callback.message.answer("⚠️️ ليس لديك أي مواد مخصصة حالياً.")
         await callback.answer()
         return
 
@@ -971,21 +1014,21 @@ async def view_student_profile(callback: types.CallbackQuery):
 
     u = profile["user"]
     subs_str = "\n".join([f"• {s['subject']} ({'شهري' if s['type'] == 'monthly' else 'كامل'})" for s in profile["subscriptions"]]) or "لا توجد اشتراكات"
-    codes_str = "\n".join([f"• `{c['code']}` مادة: {c['subject']}" for c in profile["used_codes"]]) or "لا توجد أكواد مفعّلة"
+    codes_str = "\n".join([f"• {c['code']} مادة: {c['subject']}" for c in profile["used_codes"]]) or "لا توجد أكواد مفعّلة"
 
     block_status = "🔴 محظور" if u.is_blocked else "🟢 نشط"
-    free_lecture_status = "✅ استهلك المحاضرة المجانية" if u.has_used_free_lecture else "❌ لم يستعملها بعد"
+    free_lecture_status = "🎁 المحاضرة الأولى من كل مادة مجانية"
 
     msg = (
-        f"👤 **ملف الطالب التفصيلي:**\n\n"
-        f"• **الاسم:** {u.full_name or 'غير محدد'}\n"
-        f"• **المعرف:** @{u.username if u.username else 'لا يوجد'}\n"
-        f"• **ID:** `{u.id}`\n"
-        f"• **حالة الحساب:** {block_status}\n"
-        f"• **تاريخ الانضمام:** `{u.created_at.strftime('%Y-%m-%d') if u.created_at else 'غير مسجل'}`\n"
-        f"• **المحاضرة المجانية:** {free_lecture_status}\n\n"
-        f"📚 **الاشتراكات الفعّالة:**\n{subs_str}\n\n"
-        f"🔑 **الأكواد المستخدمة:**\n{codes_str}"
+        f"👤 ملف الطالب التفصيلي:\n\n"
+        f"• الاسم: {u.full_name or 'غير محدد'}\n"
+        f"• المعرف: @{u.username if u.username else 'لا يوجد'}\n"
+        f"• ID: {u.id}\n"
+        f"• حالة الحساب: {block_status}\n"
+        f"• تاريخ الانضمام: {u.created_at.strftime('%Y-%m-%d') if u.created_at else 'غير مسجل'}\n"
+        f"• المحاضرة المجانية: {free_lecture_status}\n\n"
+        f"📚 الاشتراكات الفعّالة:\n{subs_str}\n\n"
+        f"🔑 الأكواد المستخدمة:\n{codes_str}"
     )
 
     block_btn_text = "🟢 إلغاء الحظر" if u.is_blocked else "🔴 حظر الطالب"
@@ -994,7 +1037,7 @@ async def view_student_profile(callback: types.CallbackQuery):
         [InlineKeyboardButton(text=block_btn_text, callback_data=f"toggle_block_{u.id}")],
         [InlineKeyboardButton(text="🔙 العودة", callback_data="super_students_mgr")]
     ]
-    await callback.message.answer(msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=builder), parse_mode="Markdown")
+    await callback.message.answer(msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=builder), parse_mode=None)
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("toggle_block_"))
@@ -1074,7 +1117,7 @@ async def exec_targeted_broadcast(message: types.Message, state: FSMContext):
 
     user_ids = await get_broadcast_target_ids(target_type, subject_id)
     if not user_ids:
-        await message.answer("⚠️️ لا يوجد مستخدمون ضمن هذه الفئة حالياً.", reply_markup=get_main_keyboard(message.from_user.id))
+        await message.answer("⚠ لا يوجد مستخدمون ضمن هذه الفئة حالياً.", reply_markup=get_main_keyboard(message.from_user.id))
         await state.clear()
         return
 
@@ -1160,7 +1203,7 @@ async def export_data_excel(callback: types.CallbackQuery):
     await callback.message.answer_document(file_input, caption="📊 **تقرير بيانات المنصة الشامل بصيغة Excel**", parse_mode="Markdown")
     await callback.answer()
 
-# --- 5. لوحة الأدمن والأكواد ---
+# --- 5. لوحة الأدمن والأكواد والإضافة ---
 
 @dp.callback_query(F.data == "admin_stats")
 async def show_admin_stats(callback: types.CallbackQuery):
@@ -1285,10 +1328,9 @@ async def process_assign_teacher_finish(callback: types.CallbackQuery, state: FS
 
     success = await assign_subject_to_teacher(teacher_id, subject_id)
     if success:
-        await callback.message.answer(f"✅ **تم تعيين المدرس (`{teacher_id}`) وإسناد المادة بنجاح!**", reply_markup=get_main_keyboard(callback.from_user.id), parse_mode="Markdown")
+        await callback.message.answer(f"✅ **تم تعيين المدرس (`{teacher_id}`) بنجاح للمادة!**")
     else:
-        await callback.message.answer("⚠️ هذا المدرس مضاف مسبقاً لهذه المادة أو حدث خطأ.", reply_markup=get_main_keyboard(callback.from_user.id))
-
+        await callback.message.answer("⚠️ هذا المدرس مضاف بالفعل لهذه المادة مسبقاً.")
     await state.clear()
     await callback.answer()
 
@@ -1296,18 +1338,18 @@ async def process_assign_teacher_finish(callback: types.CallbackQuery, state: FS
 async def super_revoke_teacher_menu(callback: types.CallbackQuery):
     if str(callback.from_user.id) != str(ADMIN_ID): return
 
-    teachers_list = await get_all_teachers_with_subjects()
-    if not teachers_list:
-        await callback.message.answer("ℹ️ لا توجد صلاحيات تدريس مضافة حالياً لإزالتها.")
+    teachers = await get_all_teachers_with_subjects()
+    if not teachers:
+        await callback.message.answer("ℹ️ لا توجد صلاحيات تدريس مضافة حالياً لتعديلها.")
         await callback.answer()
         return
 
     builder = []
-    for item in teachers_list:
-        btn_text = f"❌ {item['teacher_name']} ➔ {item['subject_name']}"
+    for item in teachers:
+        btn_text = f"❌ {item['teacher_name']} - 📘 {item['subject_name']}"
         builder.append([InlineKeyboardButton(text=btn_text, callback_data=f"revoke_ts_{item['ts_id']}")])
 
-    await callback.message.answer("🗑️ **اختر الصلاحية المراد سحبها وإلغاء إسناد المادة:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder), parse_mode="Markdown")
+    await callback.message.answer("❌ **اختر الصلاحية المراد سحبها من المدرس:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder), parse_mode="Markdown")
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("revoke_ts_"))
@@ -1315,68 +1357,60 @@ async def process_revoke_teacher(callback: types.CallbackQuery):
     ts_id = int(callback.data.split("_")[2])
     success = await remove_teacher_permission(ts_id)
     if success:
-        await callback.message.answer("✅ **تم إلغاء صلاحية المدرس بنجاح!**")
+        await callback.message.answer("✅ تم إلغاء صلاحية المدرس بنجاح.")
     else:
-        await callback.message.answer("❌ تعذر إزالة الصلاحية.")
+        await callback.message.answer("❌ حدث خطأ أثناء السحب.")
     await callback.answer()
 
-# --- 6. إضافة وإدارة الهيكل التعليمي (مراحل، مواد، دروس، ملفات) ---
+# --- إضافة المحتوى والمواد والدروس ---
 
 @dp.callback_query(F.data == "admin_add_grade")
-async def add_grade_start(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.answer("➕ **أدخل اسم المرحلة الدراسية الجديدة (مثال: السادس الإعدادي):**", reply_markup=get_cancel_keyboard(), parse_mode="Markdown")
+async def start_add_grade(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.answer("📚 **أرسل اسم المرحلة الدراسية الجديدة (مثل: الثالث المتوسط):**", reply_markup=get_cancel_keyboard())
     await state.set_state(AdminStates.waiting_for_grade_name)
     await callback.answer()
 
 @dp.message(AdminStates.waiting_for_grade_name)
 async def process_add_grade(message: types.Message, state: FSMContext):
-    grade_name = message.text.strip()
-    async with AsyncSessionLocal() as session:
-        new_grade = Grade(name=grade_name)
-        session.add(new_grade)
-        await session.commit()
-
-    await message.answer(f"✅ **تمت إضافة المرحلة الدراسية بنجاح:** `{grade_name}`", reply_markup=get_main_keyboard(message.from_user.id), parse_mode="Markdown")
+    g_name = message.text.strip()
+    await create_grade(g_name)
+    await message.answer(f"✅ تم إضافة المرحلة الدراسية: **{g_name}** بنجاح!", reply_markup=get_main_keyboard(message.from_user.id), parse_mode="Markdown")
     await state.clear()
 
 @dp.callback_query(F.data == "admin_add_subject")
-async def add_subject_start(callback: types.CallbackQuery, state: FSMContext):
+async def start_add_subject(callback: types.CallbackQuery, state: FSMContext):
     async with AsyncSessionLocal() as session:
         grades = (await session.execute(select(Grade))).scalars().all()
 
     if not grades:
-        await callback.message.answer("⚠️ يجب إضافة مرحلة دراسية واحدة على الأقل أولاً!")
+        await callback.message.answer("⚠️ يرجى إضافة مرحلة دراسية واحدة على الأقل أولاً!")
         await callback.answer()
         return
 
-    builder = [[InlineKeyboardButton(text=f"📚 {g.name}", callback_data=f"add_sub_grade_{g.id}")] for g in grades]
-    await callback.message.answer("📚 **اختر المرحلة التي تتبع لها المادة الجديدة:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder), parse_mode="Markdown")
+    builder = [[InlineKeyboardButton(text=f"📚 {g.name}", callback_data=f"add_sub_g_{g.id}")] for g in grades]
+    await callback.message.answer("📚 **اختر المرحلة الدراسية لإضافة مادة جديدة إليها:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder), parse_mode="Markdown")
     await callback.answer()
 
-@dp.callback_query(F.data.startswith("add_sub_grade_"))
-async def process_add_sub_grade_selected(callback: types.CallbackQuery, state: FSMContext):
-    grade_id = int(callback.data.split("_")[3])
-    await state.update_data(target_grade_id=grade_id)
-    await callback.message.answer("📘 **أدخل اسم المادة الدراسية الجديدة (مثال: الرياضيات):**", reply_markup=get_cancel_keyboard(), parse_mode="Markdown")
+@dp.callback_query(F.data.startswith("add_sub_g_"))
+async def select_grade_for_subject(callback: types.CallbackQuery, state: FSMContext):
+    g_id = int(callback.data.split("_")[3])
+    await state.update_data(target_grade_id=g_id)
+    await callback.message.answer("📘 **أرسل اسم المادة الدراسية الجديدة (مثل: الرياضيات):**", reply_markup=get_cancel_keyboard())
     await state.set_state(AdminStates.waiting_for_subject_name)
     await callback.answer()
 
 @dp.message(AdminStates.waiting_for_subject_name)
-async def process_add_subject_finish(message: types.Message, state: FSMContext):
-    subject_name = message.text.strip()
+async def process_add_subject(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    grade_id = data.get("target_grade_id")
+    g_id = data.get("target_grade_id")
+    s_name = message.text.strip()
 
-    async with AsyncSessionLocal() as session:
-        new_sub = Subject(name=subject_name, grade_id=grade_id)
-        session.add(new_sub)
-        await session.commit()
-
-    await message.answer(f"✅ **تمت إضافة المادة بنجاح:** `{subject_name}`", reply_markup=get_main_keyboard(message.from_user.id), parse_mode="Markdown")
+    await create_subject(s_name, g_id)
+    await message.answer(f"✅ تم إضافة المادة: **{s_name}** بنجاح!", reply_markup=get_main_keyboard(message.from_user.id), parse_mode="Markdown")
     await state.clear()
 
 @dp.callback_query(F.data == "admin_add_lesson")
-async def add_lesson_start(callback: types.CallbackQuery, state: FSMContext):
+async def start_add_lesson(callback: types.CallbackQuery, state: FSMContext):
     u_id = callback.from_user.id
     allowed_ids = await get_teacher_allowed_subjects(u_id)
 
@@ -1387,38 +1421,34 @@ async def add_lesson_start(callback: types.CallbackQuery, state: FSMContext):
             subjects = (await session.execute(select(Subject).options(selectinload(Subject.grade)).where(Subject.id.in_(allowed_ids)))).scalars().all()
 
     if not subjects:
-        await callback.message.answer("⚠️ لا توجد مواد متاحة لك لإضافة دروس فيها.")
+        await callback.message.answer("⚠️ لا توجد مواد مضافة أو مسندة إليك لإضافة درس لها!")
         await callback.answer()
         return
 
-    builder = [[InlineKeyboardButton(text=f"📘 {s.grade.name} ➔ {s.name}", callback_data=f"add_les_sub_{s.id}")] for s in subjects]
-    await callback.message.answer("📘 **اختر المادة المراد إضافة درس/محاضرة إليها:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder), parse_mode="Markdown")
+    builder = [[InlineKeyboardButton(text=f"📘 {s.grade.name} ➔ {s.name}", callback_data=f"add_les_s_{s.id}")] for s in subjects]
+    await callback.message.answer("📘 **اختر المادة لإضافة درس جديد إليها:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder), parse_mode="Markdown")
     await callback.answer()
 
-@dp.callback_query(F.data.startswith("add_les_sub_"))
-async def process_add_les_sub_selected(callback: types.CallbackQuery, state: FSMContext):
-    subject_id = int(callback.data.split("_")[3])
-    await state.update_data(target_subject_id=subject_id)
-    await callback.message.answer("📝 **أدخل عنوان المحاضرة أو الدرس الجديد:**", reply_markup=get_cancel_keyboard(), parse_mode="Markdown")
+@dp.callback_query(F.data.startswith("add_les_s_"))
+async def select_subject_for_lesson(callback: types.CallbackQuery, state: FSMContext):
+    s_id = int(callback.data.split("_")[3])
+    await state.update_data(target_subject_id=s_id)
+    await callback.message.answer("📝 **أرسل عنوان الدرس / المحاضرة:**", reply_markup=get_cancel_keyboard())
     await state.set_state(AdminStates.waiting_for_lesson_title)
     await callback.answer()
 
 @dp.message(AdminStates.waiting_for_lesson_title)
-async def process_add_lesson_finish(message: types.Message, state: FSMContext):
-    lesson_title = message.text.strip()
+async def process_add_lesson(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    subject_id = data.get("target_subject_id")
+    s_id = data.get("target_subject_id")
+    title = message.text.strip()
 
-    async with AsyncSessionLocal() as session:
-        new_lesson = Lesson(title=lesson_title, subject_id=subject_id)
-        session.add(new_lesson)
-        await session.commit()
-
-    await message.answer(f"✅ **تمت إضافة الدرس بنجاح:** `{lesson_title}`", reply_markup=get_main_keyboard(message.from_user.id), parse_mode="Markdown")
+    await create_lesson(title, s_id)
+    await message.answer(f"✅ تم إضافة الدرس: **{title}** بنجاح!", reply_markup=get_main_keyboard(message.from_user.id), parse_mode="Markdown")
     await state.clear()
 
 @dp.callback_query(F.data == "admin_add_file")
-async def add_file_start(callback: types.CallbackQuery, state: FSMContext):
+async def start_add_file(callback: types.CallbackQuery, state: FSMContext):
     u_id = callback.from_user.id
     allowed_ids = await get_teacher_allowed_subjects(u_id)
 
@@ -1429,66 +1459,57 @@ async def add_file_start(callback: types.CallbackQuery, state: FSMContext):
             lessons = (await session.execute(select(Lesson).options(selectinload(Lesson.subject)).where(Lesson.subject_id.in_(allowed_ids)))).scalars().all()
 
     if not lessons:
-        await callback.message.answer("⚠️ لا توجد محاضرات متاحة لك لنشر المحتوى داخلها.")
+        await callback.message.answer("⚠️ لا توجد دروس مضافة حالياً لنشر المحتوى فيها!")
         await callback.answer()
         return
 
-    builder = [[InlineKeyboardButton(text=f"📝 {l.subject.name} ➔ {l.title}", callback_data=f"add_file_les_{l.id}")] for l in lessons]
-    await callback.message.answer("📜 **اختر المحاضرة المراد إضافة المحتوى/الملف إليها:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder), parse_mode="Markdown")
+    builder = [[InlineKeyboardButton(text=f"📝 {l.subject.name if l.subject else ''} ➔ {l.title}", callback_data=f"add_fil_l_{l.id}")] for l in lessons]
+    await callback.message.answer("📝 **اختر المحاضرة المراد رفع ملف/محتوى داخلها:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder), parse_mode="Markdown")
     await callback.answer()
 
-@dp.callback_query(F.data.startswith("add_file_les_"))
-async def process_add_file_les_selected(callback: types.CallbackQuery, state: FSMContext):
-    lesson_id = int(callback.data.split("_")[3])
-    await state.update_data(target_lesson_id=lesson_id)
-    await callback.message.answer("📤 **قم بإرسال الملف أو الصورة أو الفيديو أو الملخص (مع إضافة الشرح بـ Caption إن وجد):**", reply_markup=get_cancel_keyboard(), parse_mode="Markdown")
+@dp.callback_query(F.data.startswith("add_fil_l_"))
+async def select_lesson_for_file(callback: types.CallbackQuery, state: FSMContext):
+    l_id = int(callback.data.split("_")[3])
+    await state.update_data(target_lesson_id=l_id)
+    await callback.message.answer("📤 **قم بإرسال المحتوى الآن (ملف PDF، فيديو، صورة، تسجيل صوتي، أو نص):**", reply_markup=get_cancel_keyboard())
     await state.set_state(AdminStates.waiting_for_file)
     await callback.answer()
 
 @dp.message(AdminStates.waiting_for_file)
-async def process_add_file_finish(message: types.Message, state: FSMContext):
+async def process_add_file(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    lesson_id = data.get("target_lesson_id")
+    l_id = data.get("target_lesson_id")
 
-    file_id, file_type, title = None, "text", message.caption or message.text or "محتوى تعليمي"
+    file_id, file_type, title = None, "text", message.text or message.caption or "مرفق تعليمي"
 
     if message.document:
         file_id, file_type = message.document.file_id, "document"
-        title = message.caption or message.document.file_name or "ملف مستند"
     elif message.photo:
         file_id, file_type = message.photo[-1].file_id, "photo"
-        title = message.caption or "صورة تعليمية"
     elif message.video:
         file_id, file_type = message.video.file_id, "video"
-        title = message.caption or "فيديو شرح"
-    elif message.voice:
-        file_id, file_type = message.voice.file_id, "voice"
-        title = message.caption or "تسجيل صوتي"
     elif message.audio:
         file_id, file_type = message.audio.file_id, "audio"
-        title = message.caption or message.audio.title or "ملف صوتي"
+    elif message.voice:
+        file_id, file_type = message.voice.file_id, "voice"
 
-    async with AsyncSessionLocal() as session:
-        new_file = FileItem(title=title, file_id=file_id, file_type=file_type, lesson_id=lesson_id)
-        session.add(new_file)
-        await session.commit()
-
-    await message.answer("✅ **تم رفع المحتوى ونشره داخل المحاضرة بنجاح!**", reply_markup=get_main_keyboard(message.from_user.id))
+    await create_file_item(title=title, lesson_id=l_id, file_id=file_id, file_type=file_type)
+    await message.answer("✅ **تم رفع ونشر المحتوى داخل المحاضرة بنجاح!**", reply_markup=get_main_keyboard(message.from_user.id), parse_mode="Markdown")
     await state.clear()
 
-# --- 7. قسم التعديل والإعادة التسمية ---
+# --- التعديل والحذف ---
 
 @dp.callback_query(F.data == "admin_edit_menu")
-async def edit_menu(callback: types.CallbackQuery):
+async def admin_edit_menu(callback: types.CallbackQuery):
     buttons = [
-        [InlineKeyboardButton(text="✏️ تعديل اسم مادة", callback_data="edit_subject_start")],
-        [InlineKeyboardButton(text="✏️ تعديل عنوان درس", callback_data="edit_lesson_start")]
+        [InlineKeyboardButton(text="✏️ إعادة تسمية مادة", callback_data="edit_sel_subject")],
+        [InlineKeyboardButton(text="✏️ إعادة تسمية درس", callback_data="edit_sel_lesson")]
     ]
-    await callback.message.answer("✏️ **قائمة التعديل وإعادة التسمية:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
+    await callback.message.answer("✏️ **اختر العنصر المراد تعديل مسمّاه:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
     await callback.answer()
 
-@dp.callback_query(F.data == "edit_subject_start")
-async def edit_subject_start(callback: types.CallbackQuery, state: FSMContext):
+@dp.callback_query(F.data == "edit_sel_subject")
+async def edit_sel_subject(callback: types.CallbackQuery, state: FSMContext):
     async with AsyncSessionLocal() as session:
         subjects = (await session.execute(select(Subject))).scalars().all()
 
@@ -1498,26 +1519,26 @@ async def edit_subject_start(callback: types.CallbackQuery, state: FSMContext):
         return
 
     builder = [[InlineKeyboardButton(text=f"📘 {s.name}", callback_data=f"rename_sub_{s.id}")] for s in subjects]
-    await callback.message.answer("📘 **اختر المادة المراد تعديل اسمها:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder), parse_mode="Markdown")
+    await callback.message.answer("📘 **اختر المادة لتغيير اسمها:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("rename_sub_"))
-async def prompt_new_sub_name(callback: types.CallbackQuery, state: FSMContext):
+async def start_rename_sub(callback: types.CallbackQuery, state: FSMContext):
     sub_id = int(callback.data.split("_")[2])
-    await state.update_data(edit_sub_id=sub_id)
-    await callback.message.answer("✏️ **أرسل الاسم الجديد للمادة:**", reply_markup=get_cancel_keyboard())
+    await state.update_data(edit_subject_id=sub_id)
+    await callback.message.answer("✏️️ **أرسل الاسم الجديد للمادة:**", reply_markup=get_cancel_keyboard())
     await state.set_state(AdminStates.waiting_for_new_subject_name)
     await callback.answer()
 
 @dp.message(AdminStates.waiting_for_new_subject_name)
-async def process_rename_sub(message: types.Message, state: FSMContext):
+async def save_rename_sub(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    await update_subject_name(data["edit_sub_id"], message.text.strip())
-    await message.answer("✅ **تم تحديث اسم المادة بنجاح!**", reply_markup=get_main_keyboard(message.from_user.id))
+    await update_subject_name(data["edit_subject_id"], message.text.strip())
+    await message.answer("✅ تم تحديث اسم المادة بنجاح!", reply_markup=get_main_keyboard(message.from_user.id))
     await state.clear()
 
-@dp.callback_query(F.data == "edit_lesson_start")
-async def edit_lesson_start(callback: types.CallbackQuery, state: FSMContext):
+@dp.callback_query(F.data == "edit_sel_lesson")
+async def edit_sel_lesson(callback: types.CallbackQuery, state: FSMContext):
     async with AsyncSessionLocal() as session:
         lessons = (await session.execute(select(Lesson))).scalars().all()
 
@@ -1527,39 +1548,37 @@ async def edit_lesson_start(callback: types.CallbackQuery, state: FSMContext):
         return
 
     builder = [[InlineKeyboardButton(text=f"📝 {l.title}", callback_data=f"rename_les_{l.id}")] for l in lessons]
-    await callback.message.answer("📝 **اختر الدرس المراد تعديل عنوانه:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder), parse_mode="Markdown")
+    await callback.message.answer("📝 **اختر الدرس لتغيير عنوانه:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("rename_les_"))
-async def prompt_new_les_name(callback: types.CallbackQuery, state: FSMContext):
+async def start_rename_les(callback: types.CallbackQuery, state: FSMContext):
     les_id = int(callback.data.split("_")[2])
-    await state.update_data(edit_les_id=les_id)
+    await state.update_data(edit_lesson_id=les_id)
     await callback.message.answer("✏️ **أرسل العنوان الجديد للدرس:**", reply_markup=get_cancel_keyboard())
     await state.set_state(AdminStates.waiting_for_new_lesson_title)
     await callback.answer()
 
 @dp.message(AdminStates.waiting_for_new_lesson_title)
-async def process_rename_les(message: types.Message, state: FSMContext):
+async def save_rename_les(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    await update_lesson_name(data["edit_les_id"], message.text.strip())
-    await message.answer("✅ **تم تحديث عنوان الدرس بنجاح!**", reply_markup=get_main_keyboard(message.from_user.id))
+    await update_lesson_name(data["edit_lesson_id"], message.text.strip())
+    await message.answer("✅ تم تحديث عنوان الدرس بنجاح!", reply_markup=get_main_keyboard(message.from_user.id))
     await state.clear()
 
-# --- 8. قسم الحذف الشامل ---
-
 @dp.callback_query(F.data == "admin_delete_menu")
-async def delete_menu(callback: types.CallbackQuery):
+async def admin_delete_menu(callback: types.CallbackQuery):
     buttons = [
-        [InlineKeyboardButton(text="🗑️ حذف مرحلة دراسية بالكامل", callback_data="del_grade_start")],
-        [InlineKeyboardButton(text="🗑️ حذف مادة دراسية", callback_data="del_subject_start")],
-        [InlineKeyboardButton(text="🗑️ حذف درس / محاضرة", callback_data="del_lesson_start")],
-        [InlineKeyboardButton(text="🗑️ حذف محتوى / ملف مرفوق", callback_data="del_file_start")]
+        [InlineKeyboardButton(text="🗑️ حذف مرحلة دراسية", callback_data="del_sel_grade")],
+        [InlineKeyboardButton(text="🗑️ حذف مادة", callback_data="del_sel_subject")],
+        [InlineKeyboardButton(text="🗑️ حذف درس / محاضرة", callback_data="del_sel_lesson")],
+        [InlineKeyboardButton(text="🗑️ حذف محتوى / مرفق", callback_data="del_sel_file")]
     ]
-    await callback.message.answer("🗑️ **قائمة إدارة الحذف (تحذير: الحذف نهائي):**", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
+    await callback.message.answer("🗑️ **إدارة حذف العناصر من المنصة:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
     await callback.answer()
 
-@dp.callback_query(F.data == "del_grade_start")
-async def del_grade_start(callback: types.CallbackQuery):
+@dp.callback_query(F.data == "del_sel_grade")
+async def del_sel_grade(callback: types.CallbackQuery):
     async with AsyncSessionLocal() as session:
         grades = (await session.execute(select(Grade))).scalars().all()
 
@@ -1568,21 +1587,19 @@ async def del_grade_start(callback: types.CallbackQuery):
         await callback.answer()
         return
 
-    builder = [[InlineKeyboardButton(text=f"🗑️ {g.name}", callback_data=f"confirm_del_grade_{g.id}")] for g in grades]
-    await callback.message.answer("⚠️ **اختر المرحلة المراد حذفها بكافة موادها ودروسها:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder), parse_mode="Markdown")
+    builder = [[InlineKeyboardButton(text=f"🗑️ {g.name}", callback_data=f"exec_del_grade_{g.id}")] for g in grades]
+    await callback.message.answer("⚠️ **اختر المرحلة المراد حذفها (سيتم حذف جميع موادها ودروسها تلقائياً):**", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
     await callback.answer()
 
-@dp.callback_query(F.data.startswith("confirm_del_grade_"))
-async def process_del_grade(callback: types.CallbackQuery):
+@dp.callback_query(F.data.startswith("exec_del_grade_"))
+async def exec_del_grade(callback: types.CallbackQuery):
     g_id = int(callback.data.split("_")[3])
-    if await delete_grade(g_id):
-        await callback.message.answer("✅ **تم حذف المرحلة التعليمية وجميع ملحقاتها بنجاح.**")
-    else:
-        await callback.message.answer("❌ تعذر حذف المرحلة.")
+    await delete_grade(g_id)
+    await callback.message.answer("✅ تم حذف المرحلة الدراسية بنجاح.")
     await callback.answer()
 
-@dp.callback_query(F.data == "del_subject_start")
-async def del_subject_start(callback: types.CallbackQuery):
+@dp.callback_query(F.data == "del_sel_subject")
+async def del_sel_subject(callback: types.CallbackQuery):
     async with AsyncSessionLocal() as session:
         subjects = (await session.execute(select(Subject))).scalars().all()
 
@@ -1591,21 +1608,19 @@ async def del_subject_start(callback: types.CallbackQuery):
         await callback.answer()
         return
 
-    builder = [[InlineKeyboardButton(text=f"🗑️ {s.name}", callback_data=f"confirm_del_sub_{s.id}")] for s in subjects]
-    await callback.message.answer("⚠️ **اختر المادة المراد حذفها بكافة دروسها:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder), parse_mode="Markdown")
+    builder = [[InlineKeyboardButton(text=f"🗑️ {s.name}", callback_data=f"exec_del_subject_{s.id}")] for s in subjects]
+    await callback.message.answer("⚠️ **اختر المادة المراد حذفها:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
     await callback.answer()
 
-@dp.callback_query(F.data.startswith("confirm_del_sub_"))
-async def process_del_subject(callback: types.CallbackQuery):
+@dp.callback_query(F.data.startswith("exec_del_subject_"))
+async def exec_del_subject(callback: types.CallbackQuery):
     s_id = int(callback.data.split("_")[3])
-    if await delete_subject(s_id):
-        await callback.message.answer("✅ **تم حذف المادة بنجاح.**")
-    else:
-        await callback.message.answer("❌ تعذر حذف المادة.")
+    await delete_subject(s_id)
+    await callback.message.answer("✅ تم حذف المادة بنجاح.")
     await callback.answer()
 
-@dp.callback_query(F.data == "del_lesson_start")
-async def del_lesson_start(callback: types.CallbackQuery):
+@dp.callback_query(F.data == "del_sel_lesson")
+async def del_sel_lesson(callback: types.CallbackQuery):
     async with AsyncSessionLocal() as session:
         lessons = (await session.execute(select(Lesson))).scalars().all()
 
@@ -1614,21 +1629,19 @@ async def del_lesson_start(callback: types.CallbackQuery):
         await callback.answer()
         return
 
-    builder = [[InlineKeyboardButton(text=f"🗑️ {l.title}", callback_data=f"confirm_del_les_{l.id}")] for l in lessons]
-    await callback.message.answer("⚠️ **اختر الدرس المراد حذفه:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder), parse_mode="Markdown")
+    builder = [[InlineKeyboardButton(text=f"🗑️️ {l.title}", callback_data=f"exec_del_lesson_{l.id}")] for l in lessons]
+    await callback.message.answer("⚠️ **اختر الدرس المراد حذفه:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
     await callback.answer()
 
-@dp.callback_query(F.data.startswith("confirm_del_les_"))
-async def process_del_lesson(callback: types.CallbackQuery):
+@dp.callback_query(F.data.startswith("exec_del_lesson_"))
+async def exec_del_lesson(callback: types.CallbackQuery):
     l_id = int(callback.data.split("_")[3])
-    if await delete_lesson(l_id):
-        await callback.message.answer("✅ **تم حذف الدرس ومحتوياته بنجاح.**")
-    else:
-        await callback.message.answer("❌ تعذر حذف الدرس.")
+    await delete_lesson(l_id)
+    await callback.message.answer("✅ تم حذف الدرس بنجاح.")
     await callback.answer()
 
-@dp.callback_query(F.data == "del_file_start")
-async def del_file_start(callback: types.CallbackQuery):
+@dp.callback_query(F.data == "del_sel_file")
+async def del_sel_file(callback: types.CallbackQuery):
     async with AsyncSessionLocal() as session:
         files = (await session.execute(select(FileItem))).scalars().all()
 
@@ -1637,47 +1650,20 @@ async def del_file_start(callback: types.CallbackQuery):
         await callback.answer()
         return
 
-    builder = [[InlineKeyboardButton(text=f"🗑️ {f.title[:30]}", callback_data=f"confirm_del_file_{f.id}")] for f in files[:40]]
-    await callback.message.answer("⚠️️ **اختر المحتوى/الملف المراد حذفه:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder), parse_mode="Markdown")
+    builder = [[InlineKeyboardButton(text=f"🗑️ {f.title[:30]}", callback_data=f"exec_del_file_{f.id}")] for f in files]
+    await callback.message.answer("⚠️ **اختر المحتوى المراد حذفه:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
     await callback.answer()
 
-@dp.callback_query(F.data.startswith("confirm_del_file_"))
-async def process_del_file(callback: types.CallbackQuery):
+@dp.callback_query(F.data.startswith("exec_del_file_"))
+async def exec_del_file(callback: types.CallbackQuery):
     f_id = int(callback.data.split("_")[3])
-    if await delete_file_item(f_id):
-        await callback.message.answer("✅ **تم حذف الملف المرفوق بنجاح.**")
-    else:
-        await callback.message.answer("❌ تعذر حذف الملف.")
+    await delete_file_item(f_id)
+    await callback.message.answer("✅ تم حذف المحتوى بنجاح.")
     await callback.answer()
 
-# --- 9. أزرار المعرفة العامة والدعم الفني ---
-
-@dp.message(F.text == "📞 الدعم والاتصال")
-async def support_info(message: types.Message):
-    text = (
-        "📞 **مركز الدعم الفني والاستفسارات:**\n\n"
-        "إذا واجهتك أي مشكلة في تفعيل الاشتراكات أو الأكواد أو الوصول للمحاضرات، يرجى التواصل مع إدارة المنصة مباشرة عبر:\n"
-        f"📢 القناة الرسمية: {CHANNEL_USERNAME}\n"
-        "💬 الدعم المباشر: عبر أزرار التواصل المتاحة بالقناة."
-    )
-    await message.answer(text, parse_mode="Markdown")
-
-@dp.message(F.text == "ℹ️ عن المنصة")
-async def about_platform(message: types.Message):
-    text = (
-        "🎓 **منصة النخبة التعليمية (E E P):**\n\n"
-        "منصة تعليمية متكاملة تهدف إلى تقديم أفضل الملازم، الدروس، والمحاضرات للطلاب بأحدث وسائل المتابعة الذكية.\n"
-        "• إمكانية مشاهدة محاضرة تجريبية مجانية لكل طالب.\n"
-        "• متابعة الحضور والغياب وتسليم الواجبات.\n"
-        "• حماية كاملة للمحتويات التعليمية."
-    )
-    await message.answer(text, parse_mode="Markdown")
-
-# ==================== الدالة الرئيسية للتشغيل ====================
-
+# --- تشغيل البوت ---
 async def main():
     await init_db()
-    print("🚀 Bot starting...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
